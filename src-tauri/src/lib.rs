@@ -2,9 +2,12 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use tauri::Manager;
 
 struct TerminalSessionStore {
     next_id: AtomicU64,
@@ -44,10 +47,39 @@ struct TerminalOutput {
 }
 
 #[tauri::command]
-fn create_terminal_session(store: tauri::State<'_, TerminalSessionStore>) -> Result<TerminalSession, String> {
+fn load_terminal_settings(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let settings_path = terminal_settings_path(&app)?;
+    if !settings_path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&settings_path).map_err(|error| error.to_string())?;
+    let settings = serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    Ok(Some(settings))
+}
+
+#[tauri::command]
+fn save_terminal_settings(
+    app: tauri::AppHandle,
+    settings: serde_json::Value,
+) -> Result<(), String> {
+    let settings_path = terminal_settings_path(&app)?;
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+
+    let contents = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+    fs::write(settings_path, contents).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_terminal_session(
+    store: tauri::State<'_, TerminalSessionStore>,
+    cwd: Option<String>,
+) -> Result<TerminalSession, String> {
     let session_number = store.next_id.fetch_add(1, Ordering::Relaxed);
     let session_id = format!("session-{session_number}");
-    let cwd = env::current_dir().map_err(|error| error.to_string())?;
+    let cwd = resolve_session_cwd(cwd)?;
     let cwd_string = cwd.to_string_lossy().to_string();
 
     let pty_system = native_pty_system();
@@ -63,7 +95,7 @@ fn create_terminal_session(store: tauri::State<'_, TerminalSessionStore>) -> Res
     let init_script = format!(
         "Remove-Module PSReadLine -ErrorAction SilentlyContinue; \
          $Host.UI.RawUI.WindowTitle='tauri-termin'; \
-         function global:prompt {{ 'PS> ' }}; \
+         function global:prompt {{ \"$(Get-Location)> \" }}; \
          Set-Location -LiteralPath '{cwd}'",
         cwd = escape_powershell_single_quote(&cwd_string),
     );
@@ -251,12 +283,36 @@ fn escape_powershell_single_quote(value: &str) -> String {
     value.replace('\'', "''")
 }
 
+fn resolve_session_cwd(cwd: Option<String>) -> Result<PathBuf, String> {
+    match cwd {
+        Some(path) if !path.trim().is_empty() => {
+            let candidate = PathBuf::from(path);
+            if candidate.is_dir() {
+                Ok(candidate)
+            } else {
+                Err(format!("Working directory does not exist: {}", candidate.display()))
+            }
+        }
+        _ => env::current_dir().map_err(|error| error.to_string()),
+    }
+}
+
+fn terminal_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(config_dir.join("settings.json"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(TerminalSessionStore::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            load_terminal_settings,
+            save_terminal_settings,
             create_terminal_session,
             write_terminal_input,
             resize_terminal,

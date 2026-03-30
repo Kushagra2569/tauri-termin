@@ -3,6 +3,16 @@
   import { onDestroy, onMount, tick } from "svelte";
   import { Terminal } from "xterm";
   import { FitAddon } from "@xterm/addon-fit";
+  import TerminalSplitTree from "$lib/components/TerminalSplitTree.svelte";
+  import {
+    actionDefinitions,
+    findActionByShortcut,
+    getShortcutLabel,
+  } from "$lib/terminal-actions";
+  import {
+    createTerminalSettings,
+    hydrateTerminalSettings,
+  } from "$lib/terminal-config";
   import "xterm/css/xterm.css";
 
   /**
@@ -10,7 +20,11 @@
    * @typedef {{ output: string, cwd: string, exited: boolean }} TerminalOutputResult
    * @typedef {{ id: string, label: string, shortcut: string, description: string, run: () => void }} PaletteAction
    * @typedef {{ terminal: import("xterm").Terminal, fitAddon: FitAddon }} TerminalRuntime
-   * @typedef {{ id: string, sessionId: string | null, title: string, cwd: string | null, busy: boolean, host: HTMLDivElement | null, runtime: TerminalRuntime | null }} TerminalTab
+   * @typedef {{ id: string, title: string, sessionId: string | null, cwd: string | null, busy: boolean, host: HTMLDivElement | null, runtime: TerminalRuntime | null, transcript: string }} TerminalPane
+   * @typedef {{ id: string, paneId: string, type: "pane" }} PaneNode
+   * @typedef {{ id: string, direction: "row" | "column", type: "split", children: Array<PaneNode | SplitNode> }} SplitNode
+   * @typedef {PaneNode | SplitNode} LayoutNode
+   * @typedef {{ id: string, title: string, panes: TerminalPane[], rootNode: LayoutNode, activePaneId: string | null }} TerminalTab
    */
 
   /** @type {TerminalTab[]} */
@@ -27,6 +41,7 @@
   /** @type {HTMLElement | null} */
   let terminalViewport = $state(null);
   let removeShortcutListener = $state(() => {});
+  let settings = $state(createTerminalSettings());
 
   const sshProfiles = [
     "deploy@prod-east.example.com",
@@ -34,33 +49,28 @@
     "kusha@192.168.0.24",
   ];
 
-  /** @type {PaletteAction[]} */
-  const paletteActions = [
-    {
-      id: "new-tab",
-      label: "New terminal tab",
-      shortcut: "Ctrl+T",
-      description: "Open another local shell tab.",
-      run: () => createTerminalTab(),
-    },
-    {
-      id: "appearance",
-      label: "Appearance settings",
-      shortcut: "Soon",
-      description: "Theme and layout customization will live here.",
-      run: () => writeSystemMessage("Appearance settings are the next layer after the terminal core."),
-    },
-    {
-      id: "ssh-manager",
-      label: "SSH manager",
-      shortcut: "Soon",
-      description: "Saved profiles and remote launches.",
-      run: () => writeSystemMessage(`Saved SSH profiles: ${sshProfiles.join(" | ")}\r\n`),
-    },
-  ];
-
   const activeTab = $derived(
     tabs.find((tab) => tab.id === activeTabId) ?? tabs[0],
+  );
+
+  const activePane = $derived.by(() => {
+    if (!activeTab?.activePaneId) {
+      return null;
+    }
+
+    return activeTab.panes.find((pane) => pane.id === activeTab.activePaneId) ?? null;
+  });
+
+  const paletteActions = $derived.by(() =>
+    actionDefinitions
+      .map((action) => ({
+        id: action.id,
+        label: action.label,
+        description: action.description,
+        shortcut: getShortcutLabel(settings, action.id) || "Command bar",
+        run: () => performAction(action.id),
+      }))
+      .filter((action) => !action.id.startsWith("focusTab") || canFocusTab(action.id)),
   );
 
   const filteredPaletteActions = $derived.by(() => {
@@ -83,14 +93,35 @@
    * @returns {TerminalTab}
    */
   function createPendingTab(id, title) {
+    const paneId = `pane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     return {
       id,
-      sessionId: null,
       title,
+      panes: [createPendingPane(paneId, title)],
+      rootNode: {
+        id: `node-${paneId}`,
+        type: "pane",
+        paneId,
+      },
+      activePaneId: paneId,
+    };
+  }
+
+  /**
+   * @param {string} id
+   * @param {string} title
+   * @returns {TerminalPane}
+   */
+  function createPendingPane(id, title) {
+    return {
+      id,
+      title,
+      sessionId: null,
       cwd: null,
       busy: true,
       host: null,
       runtime: null,
+      transcript: "",
     };
   }
 
@@ -102,31 +133,63 @@
     activeTabId = id;
 
     await tick();
-    mountTabTerminal(id);
-    await initializeTabSession(id);
+    mountPendingTabTerminals(id);
+    await initializePendingTabSessions(id);
     focusActiveTerminal();
   }
 
   /**
    * @param {string} tabId
    */
-  async function initializeTabSession(tabId) {
+  function mountPendingTabTerminals(tabId) {
     const tab = tabs.find((entry) => entry.id === tabId);
-    if (!tab || !tab.runtime) {
+    if (!tab) {
+      return;
+    }
+
+    for (const pane of tab.panes) {
+      mountPaneTerminal(tab.id, pane.id);
+    }
+  }
+
+  /**
+   * @param {string} tabId
+   */
+  async function initializePendingTabSessions(tabId) {
+    const tab = tabs.find((entry) => entry.id === tabId);
+    if (!tab) {
+      return;
+    }
+
+    for (const pane of tab.panes) {
+      if (!pane.sessionId) {
+        await initializePaneSession(tab.id, pane.id, pane.cwd);
+      }
+    }
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   * @param {string | null | undefined} cwd
+   */
+  async function initializePaneSession(tabId, paneId, cwd = null) {
+    const pane = getPane(tabId, paneId);
+    if (!pane || !pane.runtime) {
       return;
     }
 
     try {
       /** @type {TerminalSessionResult} */
-      const session = await invoke("create_terminal_session");
-      tab.sessionId = session.sessionId;
-      tab.cwd = session.cwd;
-      tab.busy = false;
-      tab.runtime.terminal.writeln("Session ready. Ctrl+T for another tab, Ctrl+K for command bar.");
-      resizeActiveTerminal();
+      const session = await invoke("create_terminal_session", { cwd });
+      pane.sessionId = session.sessionId;
+      pane.cwd = session.cwd;
+      pane.busy = false;
+      appendPaneOutput(tabId, paneId, "Session ready.\r\n");
+      resizeTabTerminals(tabId);
     } catch (error) {
-      tab.busy = false;
-      tab.runtime.terminal.writeln(`Failed to start terminal session: ${String(error)}`);
+      pane.busy = false;
+      appendPaneOutput(tabId, paneId, `Failed to start terminal session: ${String(error)}\r\n`);
     }
   }
 
@@ -143,14 +206,6 @@
   }
 
   /**
-   * @param {PaletteAction} action
-   */
-  function runPaletteAction(action) {
-    action.run();
-    closePalette();
-  }
-
-  /**
    * @param {KeyboardEvent} event
    */
   function handleGlobalShortcuts(event) {
@@ -158,21 +213,16 @@
       return;
     }
 
-    if (event.ctrlKey && event.key.toLowerCase() === "k") {
-      event.preventDefault();
-      openPalette();
-      return;
-    }
-
-    if (event.ctrlKey && event.key.toLowerCase() === "t") {
-      event.preventDefault();
-      createTerminalTab();
-      return;
-    }
-
     if (event.key === "Escape" && paletteOpen) {
       event.preventDefault();
       closePalette();
+      return;
+    }
+
+    const action = findActionByShortcut(settings, event);
+    if (action) {
+      event.preventDefault();
+      performAction(action.id);
     }
   }
 
@@ -180,78 +230,60 @@
    * @param {string} text
    */
   function writeSystemMessage(text) {
-    const tab = activeTab;
-    if (!tab?.runtime) {
+    if (!activePane?.runtime) {
       return;
     }
 
-    tab.runtime.terminal.writeln("");
-    tab.runtime.terminal.writeln(text);
+    appendPaneOutput(activeTab.id, activePane.id, `\r\n${text}\r\n`);
   }
 
   /**
    * @param {string} tabId
+   * @param {string} paneId
    */
-  function mountTabTerminal(tabId) {
-    const tab = tabs.find((entry) => entry.id === tabId);
-    if (!tab || !tab.host || tab.runtime) {
+  function mountPaneTerminal(tabId, paneId) {
+    const pane = getPane(tabId, paneId);
+    if (!pane || !pane.host || pane.runtime) {
       return;
     }
 
     const terminal = new Terminal({
-      cursorBlink: true,
-      fontFamily: "Cascadia Code, Consolas, monospace",
-      fontSize: 14,
-      lineHeight: 1.35,
-      theme: {
-        background: "#0d1218",
-        foreground: "#e8edf5",
-        cursor: "#f3a76e",
-        black: "#0d1218",
-        brightBlack: "#5f6c82",
-        red: "#f38ba8",
-        brightRed: "#f9a6ba",
-        green: "#7ee787",
-        brightGreen: "#9df3a5",
-        yellow: "#ffd479",
-        brightYellow: "#ffe29e",
-        blue: "#7ba7ff",
-        brightBlue: "#9dbbff",
-        magenta: "#c6a0f6",
-        brightMagenta: "#d7b8ff",
-        cyan: "#76e3ea",
-        brightCyan: "#98edf2",
-        white: "#d8dee9",
-        brightWhite: "#f8fbff",
-      },
+      cursorBlink: settings.terminal.cursorBlink,
+      fontFamily: settings.terminal.fontFamily,
+      fontSize: settings.terminal.fontSize,
+      lineHeight: settings.terminal.lineHeight,
+      theme: settings.terminal.theme,
       allowProposedApi: false,
       convertEol: false,
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(tab.host);
+    terminal.open(pane.host);
     fitAddon.fit();
-    terminal.focus();
 
     terminal.onData((data) => {
-      if (!tab.sessionId) {
+      if (!pane.sessionId) {
         return;
       }
 
       invoke("write_terminal_input", {
-        sessionId: tab.sessionId,
+        sessionId: pane.sessionId,
         input: data,
       }).catch((error) => {
         terminal.writeln(`\r\nInput error: ${String(error)}`);
       });
     });
 
-    tab.runtime = { terminal, fitAddon };
-    terminal.writeln("Starting terminal session...");
+    pane.runtime = { terminal, fitAddon };
+    if (pane.transcript) {
+      terminal.write(pane.transcript);
+    } else {
+      appendPaneOutput(tabId, paneId, "Starting terminal session...\r\n");
+    }
   }
 
   function focusActiveTerminal() {
-    activeTab?.runtime?.terminal.focus();
+    activePane?.runtime?.terminal.focus();
   }
 
   /**
@@ -263,10 +295,11 @@
       return;
     }
 
-    tab.runtime?.terminal.dispose();
-
-    if (tab.sessionId) {
-      await invoke("close_terminal_session", { sessionId: tab.sessionId }).catch(() => {});
+    for (const pane of tab.panes) {
+      pane.runtime?.terminal.dispose();
+      if (pane.sessionId) {
+        await invoke("close_terminal_session", { sessionId: pane.sessionId }).catch(() => {});
+      }
     }
 
     const closingIndex = tabs.findIndex((entry) => entry.id === tabId);
@@ -285,74 +318,298 @@
     if (nextActive) {
       activeTabId = nextActive;
       queueMicrotask(() => {
-        resizeActiveTerminal();
+        resizeActiveTerminals();
         focusActiveTerminal();
       });
     }
   }
 
-  function resizeActiveTerminal() {
-    if (!activeTab?.runtime || !activeTab.sessionId) {
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   */
+  async function closePane(tabId, paneId) {
+    const tab = tabs.find((entry) => entry.id === tabId);
+    const pane = getPane(tabId, paneId);
+    if (!tab || !pane) {
       return;
     }
 
-    activeTab.runtime.fitAddon.fit();
-    const { cols, rows } = activeTab.runtime.terminal;
-    invoke("resize_terminal", {
-      sessionId: activeTab.sessionId,
-      cols,
-      rows,
-    }).catch(() => {});
+    if (tab.panes.length === 1) {
+      await closeTab(tabId);
+      return;
+    }
+
+    pane.runtime?.terminal.dispose();
+    if (pane.sessionId) {
+      await invoke("close_terminal_session", { sessionId: pane.sessionId }).catch(() => {});
+    }
+
+    tab.rootNode = removePaneNode(tab.rootNode, paneId);
+    tab.panes = tab.panes.filter((entry) => entry.id !== paneId);
+    if (tab.activePaneId === paneId) {
+      tab.activePaneId = firstPaneIdFromNode(tab.rootNode);
+    }
+
+    queueMicrotask(() => {
+      resizeTabTerminals(tabId);
+      focusActiveTerminal();
+    });
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {"row" | "column"} direction
+   */
+  async function splitActivePane(tabId, direction) {
+    const tab = tabs.find((entry) => entry.id === tabId);
+    const sourcePane = getPane(tabId, tab?.activePaneId ?? "");
+    if (!tab || !sourcePane) {
+      return;
+    }
+
+    const paneId = `pane-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const newPane = createPendingPane(paneId, `Split ${tab.panes.length + 1}`);
+    newPane.cwd = sourcePane.cwd;
+
+    tab.panes = [...tab.panes, newPane];
+    tab.rootNode = splitPaneNode(tab.rootNode, sourcePane.id, direction, paneId);
+    tab.activePaneId = paneId;
+
+    await tick();
+    mountPaneTerminal(tab.id, paneId);
+    await initializePaneSession(tab.id, paneId, sourcePane.cwd);
+    resizeTabTerminals(tab.id);
+    focusActiveTerminal();
+  }
+
+  /**
+   * @param {number} offset
+   */
+  function focusTabByOffset(offset) {
+    if (tabs.length < 2 || !activeTabId) {
+      return;
+    }
+
+    const currentIndex = tabs.findIndex((entry) => entry.id === activeTabId);
+    if (currentIndex === -1) {
+      return;
+    }
+
+    const nextIndex = (currentIndex + offset + tabs.length) % tabs.length;
+    activateTab(tabs[nextIndex]?.id);
+  }
+
+  /**
+   * @param {number} index
+   */
+  function focusTabByIndex(index) {
+    activateTab(tabs[index]?.id ?? null);
+  }
+
+  /**
+   * @param {string | null} tabId
+   */
+  async function activateTab(tabId) {
+    if (!tabId || !tabs.some((tab) => tab.id === tabId)) {
+      return;
+    }
+
+    activeTabId = tabId;
+    await tick();
+    resizeActiveTerminals();
+    focusActiveTerminal();
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   */
+  function activatePane(tabId, paneId) {
+    const tab = tabs.find((entry) => entry.id === tabId);
+    if (!tab || !tab.panes.some((pane) => pane.id === paneId)) {
+      return;
+    }
+
+    activeTabId = tabId;
+    tab.activePaneId = paneId;
+    queueMicrotask(() => {
+      resizeActiveTerminals();
+      focusActiveTerminal();
+    });
+  }
+
+  /**
+   * @param {string} actionId
+   */
+  async function performAction(actionId) {
+    if (actionId === "openCommandBar") {
+      openPalette();
+      return;
+    }
+
+    if (actionId === "newTab") {
+      await createTerminalTab();
+      return;
+    }
+
+    if (actionId === "splitVertical" && activeTab) {
+      await splitActivePane(activeTab.id, "row");
+      closePalette();
+      return;
+    }
+
+    if (actionId === "splitHorizontal" && activeTab) {
+      await splitActivePane(activeTab.id, "column");
+      closePalette();
+      return;
+    }
+
+    if (actionId === "closePane" && activeTab?.activePaneId) {
+      await closePane(activeTab.id, activeTab.activePaneId);
+      return;
+    }
+
+    if (actionId === "closeTab") {
+      await closeTab(activeTabId);
+      return;
+    }
+
+    if (actionId === "nextTab") {
+      focusTabByOffset(1);
+      return;
+    }
+
+    if (actionId === "previousTab") {
+      focusTabByOffset(-1);
+      return;
+    }
+
+    if (actionId === "appearance") {
+      writeSystemMessage("Appearance settings will be driven by saved terminal settings soon.");
+      closePalette();
+      return;
+    }
+
+    if (actionId === "sshManager") {
+      writeSystemMessage(`Saved SSH profiles: ${sshProfiles.join(" | ")}\r\n`);
+      closePalette();
+      return;
+    }
+
+    if (actionId.startsWith("focusTab")) {
+      const index = Number(actionId.replace("focusTab", "")) - 1;
+      focusTabByIndex(index);
+      closePalette();
+    }
+  }
+
+  /**
+   * @param {string} actionId
+   */
+  function canFocusTab(actionId) {
+    const index = Number(actionId.replace("focusTab", "")) - 1;
+    return Number.isInteger(index) && index >= 0 && index < tabs.length;
+  }
+
+  /**
+   * @param {PaletteAction} action
+   */
+  function runPaletteAction(action) {
+    action.run();
+    if (action.id !== "openCommandBar") {
+      closePalette();
+    }
+  }
+
+  function resizeActiveTerminals() {
+    if (!activeTab) {
+      return;
+    }
+
+    resizeTabTerminals(activeTab.id);
+  }
+
+  /**
+   * @param {string} tabId
+   */
+  function resizeTabTerminals(tabId) {
+    const tab = tabs.find((entry) => entry.id === tabId);
+    if (!tab) {
+      return;
+    }
+
+    for (const pane of tab.panes) {
+      if (!pane.runtime || !pane.sessionId || !pane.host || pane.host.offsetParent === null) {
+        continue;
+      }
+
+      pane.runtime.fitAddon.fit();
+      const { cols, rows } = pane.runtime.terminal;
+      invoke("resize_terminal", {
+        sessionId: pane.sessionId,
+        cols,
+        rows,
+      }).catch(() => {});
+    }
   }
 
   async function pollTerminalSessions() {
     for (const tab of tabs) {
-      if (!tab.sessionId || !tab.runtime) {
-        continue;
-      }
-
-      try {
-        /** @type {TerminalOutputResult} */
-        const result = await invoke("poll_terminal_output", {
-          sessionId: tab.sessionId,
-        });
-
-        tab.cwd = result.cwd;
-
-        if (result.output) {
-          tab.runtime.terminal.write(result.output);
+      for (const pane of tab.panes) {
+        if (!pane.sessionId || !pane.runtime) {
+          continue;
         }
 
-        if (result.exited) {
-          await closeTab(tab.id);
-          break;
+        try {
+          /** @type {TerminalOutputResult} */
+          const result = await invoke("poll_terminal_output", {
+            sessionId: pane.sessionId,
+          });
+
+          pane.cwd = result.cwd;
+
+          if (result.output) {
+            appendPaneOutput(tab.id, pane.id, result.output);
+          }
+
+          if (result.exited) {
+            await closePane(tab.id, pane.id);
+            break;
+          }
+        } catch (error) {
+          appendPaneOutput(tab.id, pane.id, `\r\nPolling error: ${String(error)}\r\n`);
         }
-      } catch (error) {
-        tab.runtime.terminal.writeln(`\r\nPolling error: ${String(error)}`);
       }
     }
   }
 
   onMount(async () => {
+    try {
+      const storedSettings = await invoke("load_terminal_settings");
+      settings = hydrateTerminalSettings(storedSettings);
+    } catch {
+      settings = createTerminalSettings();
+    }
+
     const initialTab = createPendingTab("tab-1", "PowerShell");
     tabs = [initialTab];
     activeTabId = initialTab.id;
 
     await tick();
-    mountTabTerminal(initialTab.id);
-    await initializeTabSession(initialTab.id);
+    mountPendingTabTerminals(initialTab.id);
+    await initializePendingTabSessions(initialTab.id);
 
     pollTimer = window.setInterval(pollTerminalSessions, 60);
     resizeObserver = new ResizeObserver(() => {
-      resizeActiveTerminal();
+      resizeActiveTerminals();
     });
 
     const captureShortcutListener = /** @param {KeyboardEvent} event */ (event) => {
-      const isCommandPalette = event.ctrlKey && event.key.toLowerCase() === "k";
-      const isNewTab = event.ctrlKey && event.key.toLowerCase() === "t";
       const isEscape = event.key === "Escape" && paletteOpen;
+      const shortcutAction = findActionByShortcut(settings, event);
 
-      if (!isCommandPalette && !isNewTab && !isEscape) {
+      if (!shortcutAction && !isEscape) {
         return;
       }
 
@@ -381,12 +638,151 @@
     removeShortcutListener();
 
     for (const tab of tabs) {
-      tab.runtime?.terminal.dispose();
-      if (tab.sessionId) {
-        invoke("close_terminal_session", { sessionId: tab.sessionId }).catch(() => {});
+      for (const pane of tab.panes) {
+        pane.runtime?.terminal.dispose();
+        if (pane.sessionId) {
+          invoke("close_terminal_session", { sessionId: pane.sessionId }).catch(() => {});
+        }
       }
     }
   });
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   * @returns {TerminalPane | undefined}
+   */
+  function getPane(tabId, paneId) {
+    return tabs
+      .find((entry) => entry.id === tabId)
+      ?.panes.find((pane) => pane.id === paneId);
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   * @param {HTMLDivElement | null} element
+   */
+  function setPaneHost(tabId, paneId, element) {
+    const pane = getPane(tabId, paneId);
+    if (!pane) {
+      return;
+    }
+
+    if (pane.host === element) {
+      return;
+    }
+
+    pane.host = element;
+    if (pane.runtime) {
+      pane.runtime.terminal.dispose();
+      pane.runtime = null;
+    }
+
+    if (element) {
+      mountPaneTerminal(tabId, paneId);
+    }
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   * @param {string} text
+   */
+  function appendPaneOutput(tabId, paneId, text) {
+    const pane = getPane(tabId, paneId);
+    if (!pane || !text) {
+      return;
+    }
+
+    pane.transcript += text;
+    pane.runtime?.terminal.write(text);
+  }
+
+  /**
+   * @param {LayoutNode} node
+   * @param {string} paneId
+   * @param {"row" | "column"} direction
+   * @param {string} newPaneId
+   * @returns {LayoutNode}
+   */
+  function splitPaneNode(node, paneId, direction, newPaneId) {
+    if (node.type === "pane") {
+      if (node.paneId !== paneId) {
+        return node;
+      }
+
+      return {
+        id: `split-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        type: "split",
+        direction,
+        children: [
+          node,
+          {
+            id: `node-${newPaneId}`,
+            type: "pane",
+            paneId: newPaneId,
+          },
+        ],
+      };
+    }
+
+    return {
+      ...node,
+      children: node.children.map((child) =>
+        containsPane(child, paneId) ? splitPaneNode(child, paneId, direction, newPaneId) : child,
+      ),
+    };
+  }
+
+  /**
+   * @param {LayoutNode} node
+   * @param {string} paneId
+   * @returns {LayoutNode}
+   */
+  function removePaneNode(node, paneId) {
+    if (node.type === "pane") {
+      return node;
+    }
+
+    const keptChildren = node.children
+      .map((child) => (containsPane(child, paneId) ? removePaneNode(child, paneId) : child))
+      .filter((child) => !(child.type === "pane" && child.paneId === paneId));
+
+    if (keptChildren.length === 1) {
+      return keptChildren[0];
+    }
+
+    return {
+      ...node,
+      children: keptChildren,
+    };
+  }
+
+  /**
+   * @param {LayoutNode} node
+   * @param {string} paneId
+   * @returns {boolean}
+   */
+  function containsPane(node, paneId) {
+    if (node.type === "pane") {
+      return node.paneId === paneId;
+    }
+
+    return node.children.some((child) => containsPane(child, paneId));
+  }
+
+  /**
+   * @param {LayoutNode} node
+   * @returns {string | null}
+   */
+  function firstPaneIdFromNode(node) {
+    if (node.type === "pane") {
+      return node.paneId;
+    }
+
+    return node.children.length > 0 ? firstPaneIdFromNode(node.children[0]) : null;
+  }
 </script>
 
 <main class="app-shell">
@@ -397,13 +793,7 @@
           class:active={activeTabId === tab.id}
           class="tab"
           type="button"
-          onclick={() => {
-            activeTabId = tab.id;
-            queueMicrotask(() => {
-              resizeActiveTerminal();
-              focusActiveTerminal();
-            });
-          }}
+          onclick={() => activateTab(tab.id)}
         >
           <span>{tab.title}</span>
         </button>
@@ -411,22 +801,25 @@
     </div>
 
     <div class="tab-actions">
-      <button class="action-button" type="button" onclick={createTerminalTab}>+</button>
-      <button class="action-button" type="button" onclick={openPalette}>⌘</button>
+      <button class="action-button" type="button" onclick={() => performAction("splitVertical")}>|</button>
+      <button class="action-button" type="button" onclick={() => performAction("splitHorizontal")}>-</button>
+      <button class="action-button" type="button" onclick={() => performAction("newTab")}>+</button>
+      <button class="action-button" type="button" onclick={() => performAction("openCommandBar")}>⌘</button>
     </div>
   </section>
 
   <section bind:this={terminalViewport} class="terminal-panel">
-    {#each tabs as tab (tab.id)}
-      <div class:hidden={activeTabId !== tab.id} class="terminal-surface">
-        <div
-          bind:this={tab.host}
-          class="terminal-host"
-          role="application"
-          aria-label={`Terminal ${tab.title}`}
-        ></div>
-      </div>
-    {/each}
+    {#if activeTab}
+      {#key activeTab.id}
+        <TerminalSplitTree
+          activePaneId={activeTab.activePaneId}
+          node={activeTab.rootNode}
+          panes={activeTab.panes}
+          onMountHost={(paneId, element) => setPaneHost(activeTab.id, paneId, element)}
+          onSelectPane={(paneId) => activatePane(activeTab.id, paneId)}
+        />
+      {/key}
+    {/if}
   </section>
 
   {#if paletteOpen}
@@ -561,24 +954,6 @@
     padding: 12px 14px 14px;
     box-sizing: border-box;
     overflow: hidden;
-  }
-
-  .terminal-surface {
-    height: 100%;
-    border-radius: 16px;
-    border: 1px solid rgba(255, 255, 255, 0.06);
-    background: #0d1218;
-    overflow: hidden;
-  }
-
-  .terminal-surface.hidden {
-    display: none;
-  }
-
-  .terminal-host {
-    height: 100%;
-    padding: 8px 10px;
-    box-sizing: border-box;
   }
 
   .palette-backdrop {
