@@ -43,6 +43,10 @@ Only keys defined in the frontend settings schema are applied. Unknown keys are 
     "timeoutMs": 1200,
     "shortcuts": {}
   },
+  "window": {
+    "titleBar": "native",
+    "showControlsInMinimalTitleBar": true
+  },
   "terminal": {
     "cursorBlink": true,
     "fontFamily": "Cascadia Code, Consolas, monospace",
@@ -51,6 +55,7 @@ Only keys defined in the frontend settings schema are applied. Unknown keys are 
     "scrollback": 5000,
     "rightClickBehavior": "paste",
     "copyOnSelect": false,
+    "createReplacementOnLastExit": false,
     "theme": {
       "background": "#0d1218",
       "foreground": "#e8edf5",
@@ -228,6 +233,18 @@ Behavior details:
 - Values: `true`, `false`
 - Meaning: when enabled, selecting text copies it to the clipboard automatically
 
+### `createReplacementOnLastExit`
+
+- Type: boolean
+- Default: `false`
+- Values: `true`, `false`
+
+Behavior details:
+
+- only applies when a shell process exits on the last remaining tab and pane
+- `false`: the app closes
+- `true`: the app opens a fresh replacement terminal tab instead
+
 ### `theme`
 
 All theme values are strings and should be CSS color values, usually hex colors.
@@ -267,6 +284,39 @@ Example:
   }
 }
 ```
+
+## `window`
+
+### `titleBar`
+
+- Type: string
+- Default: `"native"`
+- Allowed values:
+  - `"native"`
+  - `"minimal"`
+
+Behavior details:
+
+- `"native"`: uses the normal Windows title bar, with the app tab strip rendered just below it
+- `"minimal"`: uses a custom title bar with tabs alongside the window controls, similar to Ghostty/WezTerm
+
+This setting is applied on app startup.
+
+### `showControlsInMinimalTitleBar`
+
+- Type: boolean
+- Default: `true`
+- Values:
+  - `true`
+  - `false`
+
+Behavior details:
+
+- only applies when `window.titleBar` is `"minimal"`
+- `true`: shows the custom minimize, maximize, and close buttons in the minimal title bar
+- `false`: hides those custom buttons for a cleaner look
+
+This does not affect the native Windows title bar.
 
 ## `commandBar`
 

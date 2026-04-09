@@ -30,6 +30,10 @@ export const defaultTerminalSettings = {
     timeoutMs: 1200,
     shortcuts: {},
   },
+  window: {
+    titleBar: "native",
+    showControlsInMinimalTitleBar: true,
+  },
   terminal: {
     cursorBlink: true,
     fontFamily: "Cascadia Code, Consolas, monospace",
@@ -38,6 +42,7 @@ export const defaultTerminalSettings = {
     scrollback: 5000,
     rightClickBehavior: "paste",
     copyOnSelect: false,
+    createReplacementOnLastExit: false,
     theme: {
       background: "#0d1218",
       foreground: "#e8edf5",

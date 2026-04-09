@@ -10,6 +10,11 @@ export const actionDefinitions = [
     description: "Open a new local terminal tab.",
   },
   {
+    id: "reloadConfig",
+    label: "Reload config",
+    description: "Reload settings.json and apply the latest configuration.",
+  },
+  {
     id: "copySelection",
     label: "Copy selection",
     description: "Copy the current terminal selection to the clipboard.",

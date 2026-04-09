@@ -1,5 +1,6 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onDestroy, onMount, tick } from "svelte";
   import { Terminal } from "xterm";
   import { FitAddon } from "@xterm/addon-fit";
@@ -48,6 +49,15 @@
   let leaderActive = $state(false);
   /** @type {number | null} */
   let leaderTimer = null;
+  let isWindowMaximized = $state(false);
+  let appliedTitleBarMode = $state("native");
+
+  const appWindow = getCurrentWindow();
+
+  const usesMinimalTitleBar = $derived(appliedTitleBarMode === "minimal");
+  const showsMinimalWindowControls = $derived(
+    usesMinimalTitleBar && settings.window?.showControlsInMinimalTitleBar !== false,
+  );
 
   const sshProfiles = [
     "deploy@prod-east.example.com",
@@ -207,7 +217,6 @@
       pane.sessionId = session.sessionId;
       pane.cwd = session.cwd;
       pane.busy = false;
-      appendPaneOutput(tabId, paneId, "Session ready.\r\n");
       resizeTabTerminals(tabId);
     } catch (error) {
       pane.busy = false;
@@ -249,6 +258,36 @@
 
   function isLeaderEnabled() {
     return !!settings.leader?.enabled && !!settings.leader?.trigger;
+  }
+
+  async function reloadSettingsFromConfig({ preserveTitleBarMode = false } = {}) {
+    const previousTitleBarMode = settings.window?.titleBar ?? "native";
+
+    try {
+      const storedSettings = await invoke("load_terminal_settings");
+      settings = hydrateTerminalSettings(storedSettings);
+    } catch {
+      settings = createTerminalSettings();
+    }
+
+    const nextTitleBarMode = settings.window?.titleBar ?? "native";
+    const titleBarModeChanged = previousTitleBarMode !== nextTitleBarMode;
+
+    if (preserveTitleBarMode) {
+      settings = {
+        ...settings,
+        window: {
+          ...settings.window,
+          titleBar: appliedTitleBarMode,
+        },
+      };
+    } else {
+      appliedTitleBarMode = nextTitleBarMode;
+    }
+
+    await applySettingsToOpenTerminals();
+    isWindowMaximized = await appWindow.isMaximized().catch(() => false);
+    return { titleBarModeChanged, nextTitleBarMode };
   }
 
   /**
@@ -487,13 +526,63 @@
     };
     if (pane.transcript) {
       terminal.write(pane.transcript);
-    } else {
-      appendPaneOutput(tabId, paneId, "Starting terminal session...\r\n");
     }
   }
 
   function focusActiveTerminal() {
     activePane?.runtime?.terminal.focus();
+  }
+
+  async function applySettingsToOpenTerminals() {
+    for (const tab of tabs) {
+      for (const pane of tab.panes) {
+        const runtime = pane.runtime;
+        if (!runtime) {
+          continue;
+        }
+
+        runtime.terminal.options.cursorBlink = settings.terminal.cursorBlink;
+        runtime.terminal.options.fontFamily = settings.terminal.fontFamily;
+        runtime.terminal.options.fontSize = settings.terminal.fontSize;
+        runtime.terminal.options.lineHeight = settings.terminal.lineHeight;
+        runtime.terminal.options.scrollback = settings.terminal.scrollback;
+        runtime.terminal.options.theme = settings.terminal.theme;
+      }
+    }
+
+    await tick();
+    resizeActiveTerminals();
+  }
+
+  async function minimizeWindow() {
+    await appWindow.minimize();
+  }
+
+  async function toggleWindowMaximize() {
+    await appWindow.toggleMaximize();
+    isWindowMaximized = await appWindow.isMaximized();
+  }
+
+  async function closeWindow() {
+    await appWindow.close();
+  }
+
+  /**
+   * @param {MouseEvent} event
+   */
+  async function startWindowDrag(event) {
+    if (event.button !== 0) {
+      return;
+    }
+
+    await appWindow.startDragging().catch(() => {});
+  }
+
+  /**
+   * @param {MouseEvent} event
+   */
+  function stopTitlebarInteraction(event) {
+    event.stopPropagation();
   }
 
   /**
@@ -532,8 +621,10 @@
 
   /**
    * @param {string} tabId
+   * @param {{ createReplacementOnEmpty?: boolean }} [options]
    */
-  async function closeTab(tabId) {
+  async function closeTab(tabId, options = {}) {
+    const { createReplacementOnEmpty = true } = options;
     const tab = tabs.find((entry) => entry.id === tabId);
     if (!tab) {
       return;
@@ -555,7 +646,11 @@
     tabs = tabs.filter((entry) => entry.id !== tabId);
 
     if (tabs.length === 0) {
-      await createTerminalTab();
+      if (createReplacementOnEmpty) {
+        await createTerminalTab();
+      } else {
+        await closeWindow();
+      }
       return;
     }
 
@@ -571,8 +666,10 @@
   /**
    * @param {string} tabId
    * @param {string} paneId
+   * @param {{ createReplacementOnEmpty?: boolean }} [options]
    */
-  async function closePane(tabId, paneId) {
+  async function closePane(tabId, paneId, options = {}) {
+    const { createReplacementOnEmpty = true } = options;
     const tab = tabs.find((entry) => entry.id === tabId);
     const pane = getPane(tabId, paneId);
     if (!tab || !pane) {
@@ -580,7 +677,7 @@
     }
 
     if (tab.panes.length === 1) {
-      await closeTab(tabId);
+      await closeTab(tabId, { createReplacementOnEmpty });
       return;
     }
 
@@ -694,6 +791,17 @@
 
     if (actionId === "newTab") {
       await createTerminalTab();
+      return;
+    }
+
+    if (actionId === "reloadConfig") {
+      const reloadResult = await reloadSettingsFromConfig({ preserveTitleBarMode: true });
+      writeSystemMessage(
+        reloadResult.titleBarModeChanged
+          ? "Configuration reloaded. Title bar changes will apply after restart."
+          : "Configuration reloaded from settings.json.",
+      );
+      closePalette();
       return;
     }
 
@@ -848,7 +956,9 @@
           }
 
           if (result.exited) {
-            await closePane(tab.id, pane.id);
+            await closePane(tab.id, pane.id, {
+              createReplacementOnEmpty: settings.terminal.createReplacementOnLastExit,
+            });
             break;
           }
         } catch (error) {
@@ -859,16 +969,12 @@
   }
 
   onMount(async () => {
-    try {
-      const storedSettings = await invoke("load_terminal_settings");
-      settings = hydrateTerminalSettings(storedSettings);
-    } catch {
-      settings = createTerminalSettings();
-    }
+    await reloadSettingsFromConfig();
 
     const initialTab = createPendingTab("tab-1", "PowerShell");
     tabs = [initialTab];
     activeTabId = initialTab.id;
+    isWindowMaximized = await appWindow.isMaximized().catch(() => false);
 
     await tick();
     mountPendingTabTerminals(initialTab.id);
@@ -915,6 +1021,20 @@
     if (terminalViewport) {
       resizeObserver.observe(terminalViewport);
     }
+
+    const unlistenResize = await appWindow.onResized(async () => {
+      isWindowMaximized = await appWindow.isMaximized().catch(() => false);
+    });
+    const unlistenMoved = await appWindow.onMoved(async () => {
+      isWindowMaximized = await appWindow.isMaximized().catch(() => false);
+    });
+
+    const previousRemoveShortcutListener = removeShortcutListener;
+    removeShortcutListener = () => {
+      previousRemoveShortcutListener();
+      unlistenResize();
+      unlistenMoved();
+    };
 
     focusActiveTerminal();
   });
@@ -1228,28 +1348,59 @@
 </script>
 
 <main class="app-shell">
-  <section class="tabbar">
-    <div class="tabs">
-      {#each tabs as tab (tab.id)}
-        <button
-          class:active={activeTabId === tab.id}
-          class="tab"
-          type="button"
-          onclick={() => activateTab(tab.id)}
-        >
-          <span>{tab.title}</span>
-        </button>
-      {/each}
-    </div>
+  {#if usesMinimalTitleBar}
+    <section class="titlebar titlebar-minimal">
+      <div class="tabs">
+        {#each tabs as tab (tab.id)}
+          <button
+            class:active={activeTabId === tab.id}
+            class="tab"
+            type="button"
+            onclick={() => activateTab(tab.id)}
+          >
+            <span>{tab.title}</span>
+          </button>
+        {/each}
+      </div>
 
-    <div class="tab-actions">
-      <button class="action-button" title="Close pane" type="button" onclick={() => performAction("closePane")}>x</button>
-      <button class="action-button" type="button" onclick={() => performAction("splitVertical")}>|</button>
-      <button class="action-button" type="button" onclick={() => performAction("splitHorizontal")}>-</button>
-      <button class="action-button" type="button" onclick={() => performAction("newTab")}>+</button>
-      <button class="action-button" title="Open command bar" type="button" onclick={() => performAction("openCommandBar")}>/</button>
-    </div>
-  </section>
+      <div
+        aria-hidden="true"
+        class:titlebar-drag-space-controls={showsMinimalWindowControls}
+        class="titlebar-drag-space"
+        onmousedown={startWindowDrag}
+        ondblclick={toggleWindowMaximize}
+      ></div>
+
+      {#if showsMinimalWindowControls}
+        <div class="window-controls">
+          <button class="window-button" title="Minimize" type="button" onmousedown={stopTitlebarInteraction} onclick={minimizeWindow}>
+            <span class="window-icon minimize"></span>
+          </button>
+          <button class="window-button" title={isWindowMaximized ? "Restore" : "Maximize"} type="button" onmousedown={stopTitlebarInteraction} onclick={toggleWindowMaximize}>
+            <span class:restore={isWindowMaximized} class="window-icon maximize"></span>
+          </button>
+          <button class="window-button window-button-close" title="Close" type="button" onmousedown={stopTitlebarInteraction} onclick={closeWindow}>
+            <span class="window-icon close"></span>
+          </button>
+        </div>
+      {/if}
+    </section>
+  {:else}
+    <section class="titlebar titlebar-native">
+      <div class="tabs">
+        {#each tabs as tab (tab.id)}
+          <button
+            class:active={activeTabId === tab.id}
+            class="tab"
+            type="button"
+            onclick={() => activateTab(tab.id)}
+          >
+            <span>{tab.title}</span>
+          </button>
+        {/each}
+      </div>
+    </section>
+  {/if}
 
   <section bind:this={terminalViewport} class="terminal-panel">
     {#if activeTab}
@@ -1342,84 +1493,186 @@
     height: 100vh;
     overflow: hidden;
     background:
-      radial-gradient(circle at top, rgba(123, 167, 255, 0.08), transparent 24%),
+      radial-gradient(circle at top, rgba(255, 255, 255, 0.045), transparent 22%),
+      linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 12%),
       #0b0f14;
   }
 
-  .tabbar {
+  .titlebar {
     display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 10px 7px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01));
+    align-items: stretch;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    background: rgba(8, 11, 16, 0.92);
+    backdrop-filter: blur(14px);
+    user-select: none;
+  }
+
+  .titlebar-minimal {
+    min-height: 32px;
+    padding-left: 10px;
+  }
+
+  .titlebar-native {
+    min-height: 28px;
+    padding: 0 10px;
+    margin-top: 0;
+    background: transparent;
+    backdrop-filter: none;
   }
 
   .tabs {
     display: flex;
-    gap: 4px;
+    align-items: stretch;
+    gap: 2px;
     min-width: 0;
-    flex: 1;
+    flex: 1 1 auto;
     overflow: auto;
   }
 
   .tab {
-    min-width: 72px;
-    max-width: 170px;
-    padding: 5px 9px;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    min-width: 52px;
+    max-width: 164px;
+    height: 31px;
+    padding: 7px 10px 6px;
+    border: none;
+    border-radius: 0;
     background: transparent;
-    color: #8f9cb1;
-    text-align: left;
+    color: #6f7a8e;
+    text-align: center;
     cursor: pointer;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    font-size: 0.82rem;
+    font-size: 0.76rem;
+    letter-spacing: 0.01em;
+    position: relative;
+    -webkit-app-region: no-drag;
+  }
+
+  .titlebar-native .tabs {
+    padding-top: 2px;
+  }
+
+  .titlebar-native .tab {
+    height: 27px;
+    padding: 6px 10px 5px;
   }
 
   .tab.active {
-    color: #eef3fb;
-    background: rgba(255, 255, 255, 0.045);
-    border-color: rgba(255, 255, 255, 0.07);
+    color: #edf2fb;
+  }
+
+  .tab.active::after {
+    content: "";
+    position: absolute;
+    left: 12px;
+    right: 12px;
+    bottom: 0;
+    height: 1px;
+    border-radius: 999px;
+    background: rgba(237, 242, 251, 0.82);
   }
 
   .tab:hover {
-    background: rgba(255, 255, 255, 0.025);
+    color: #9aa6bb;
   }
 
-  .tab-actions {
+  .window-controls {
     display: flex;
-    gap: 4px;
+    flex: 0 0 auto;
+    margin-left: 8px;
   }
 
-  .action-button {
-    width: 26px;
-    height: 26px;
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 7px;
+  .titlebar-drag-space {
+    flex: 1 1 auto;
+    min-width: 24px;
+  }
+
+  .titlebar-drag-space-controls {
+    flex: 0 1 96px;
+  }
+
+  .window-button {
+    width: 46px;
+    height: 31px;
+    display: grid;
+    place-items: center;
+    border: none;
     background: transparent;
-    color: #9dabc0;
+    color: #8a94a8;
     cursor: pointer;
-    font-size: 0.82rem;
-    transition:
-      background 140ms ease,
-      border-color 140ms ease,
-      color 140ms ease;
+    transition: background 120ms ease, color 120ms ease;
   }
 
-  .action-button:hover {
-    background: rgba(255, 255, 255, 0.05);
-    border-color: rgba(255, 255, 255, 0.14);
+  .window-button:hover {
+    background: rgba(255, 255, 255, 0.06);
     color: #eef3fb;
+  }
+
+  .window-button-close:hover {
+    background: #c42b1c;
+    color: white;
+  }
+
+  .window-icon {
+    position: relative;
+    display: block;
+    width: 10px;
+    height: 10px;
+  }
+
+  .window-icon.minimize::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 1px;
+    height: 1px;
+    background: currentColor;
+  }
+
+  .window-icon.maximize::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 1px solid currentColor;
+  }
+
+  .window-icon.maximize.restore::before {
+    inset: 2px 0 0 2px;
+  }
+
+  .window-icon.maximize.restore::after {
+    content: "";
+    position: absolute;
+    inset: 0 2px 2px 0;
+    border: 1px solid currentColor;
+    background: rgba(8, 11, 16, 0.92);
+  }
+
+  .window-icon.close::before,
+  .window-icon.close::after {
+    content: "";
+    position: absolute;
+    top: 4px;
+    left: -1px;
+    width: 12px;
+    height: 1px;
+    background: currentColor;
+  }
+
+  .window-icon.close::before {
+    transform: rotate(45deg);
+  }
+
+  .window-icon.close::after {
+    transform: rotate(-45deg);
   }
 
   .terminal-panel {
     min-height: 0;
     height: 100%;
-    padding: 12px 14px 14px;
+    padding: 0 0 6px;
     box-sizing: border-box;
     overflow: hidden;
   }
@@ -1433,26 +1686,27 @@
 
   .palette {
     position: fixed;
-    top: 70px;
+    top: 52px;
     left: 50%;
     width: min(720px, calc(100vw - 32px));
     transform: translateX(-50%);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    border-radius: 18px;
-    background: #111720;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 14px;
+    background: rgba(12, 16, 24, 0.96);
     overflow: hidden;
-    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.52);
     z-index: 50;
+    backdrop-filter: blur(18px);
   }
 
   .palette input {
     width: 100%;
-    padding: 16px 18px;
+    padding: 14px 16px;
     border: none;
     outline: none;
     background: transparent;
     color: inherit;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
     box-sizing: border-box;
   }
 
@@ -1474,9 +1728,9 @@
     align-items: center;
     justify-content: space-between;
     gap: 14px;
-    padding: 12px;
+    padding: 11px 12px;
     border: none;
-    border-radius: 12px;
+    border-radius: 10px;
     background: transparent;
     color: inherit;
     text-align: left;
@@ -1485,13 +1739,13 @@
 
   .palette-item:hover,
   .palette-item.selected {
-    background: rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.04);
   }
 
   .palette-item p,
   .palette-empty {
     margin: 4px 0 0;
-    color: #8e9cb1;
+    color: #7c879b;
   }
 
   .palette-empty {
@@ -1500,7 +1754,7 @@
 
   @media (max-width: 700px) {
     .tab {
-      min-width: 120px;
+      min-width: 92px;
     }
   }
 </style>

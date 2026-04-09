@@ -48,14 +48,7 @@ struct TerminalOutput {
 
 #[tauri::command]
 fn load_terminal_settings(app: tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
-    let settings_path = terminal_settings_path(&app)?;
-    if !settings_path.exists() {
-        return Ok(None);
-    }
-
-    let contents = fs::read_to_string(&settings_path).map_err(|error| error.to_string())?;
-    let settings = serde_json::from_str(&contents).map_err(|error| error.to_string())?;
-    Ok(Some(settings))
+    read_terminal_settings(&app)
 }
 
 #[tauri::command]
@@ -308,11 +301,44 @@ fn terminal_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .join("settings.json"))
 }
 
+fn read_terminal_settings(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
+    let settings_path = terminal_settings_path(app)?;
+    if !settings_path.exists() {
+        return Ok(None);
+    }
+
+    let contents = fs::read_to_string(&settings_path).map_err(|error| error.to_string())?;
+    let settings = serde_json::from_str(&contents).map_err(|error| error.to_string())?;
+    Ok(Some(settings))
+}
+
+fn title_bar_mode(settings: Option<&serde_json::Value>) -> &str {
+    settings
+        .and_then(|value| value.get("window"))
+        .and_then(|value| value.get("titleBar"))
+        .and_then(|value| value.as_str())
+        .filter(|value| matches!(*value, "native" | "minimal"))
+        .unwrap_or("native")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .manage(TerminalSessionStore::default())
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let settings = read_terminal_settings(app.handle()).ok().flatten();
+            let use_custom_titlebar = title_bar_mode(settings.as_ref()) == "minimal";
+
+            if let Some(window) = app.get_webview_window("main") {
+                window
+                    .set_decorations(!use_custom_titlebar)
+                    .map_err(|error| error.to_string())?;
+                window.show().map_err(|error| error.to_string())?;
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             load_terminal_settings,
             save_terminal_settings,

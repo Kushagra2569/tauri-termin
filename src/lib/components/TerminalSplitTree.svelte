@@ -146,33 +146,29 @@
     height: 100%;
     min-width: 0;
     min-height: 0;
-    border: 1px solid rgba(255, 255, 255, 0.045);
-    border-radius: 14px;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 20%),
-      #0d1218;
+    border: none;
+    border-radius: 0;
+    background: transparent;
     overflow: hidden;
     padding: 0;
     color: inherit;
     text-align: left;
     transition:
-      border-color 140ms ease,
       box-shadow 140ms ease,
       background 140ms ease;
   }
 
   .pane-shell.active {
-    border-color: rgba(123, 167, 255, 0.34);
     box-shadow:
-      inset 0 0 0 1px rgba(123, 167, 255, 0.14),
-      0 0 0 1px rgba(123, 167, 255, 0.08);
+      inset 0 0 0 1px rgba(255, 255, 255, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.03);
   }
 
   .pane-host {
     min-width: 0;
     min-height: 0;
     height: 100%;
-    padding: 8px 10px;
+    padding: 10px 12px 12px;
     box-sizing: border-box;
   }
 
@@ -187,7 +183,7 @@
     position: absolute;
     inset: 0;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.03);
     transition: background 140ms ease;
   }
 
@@ -210,6 +206,6 @@
   }
 
   .divider:hover::before {
-    background: rgba(123, 167, 255, 0.34);
+    background: rgba(255, 255, 255, 0.12);
   }
 </style>
