@@ -2,9 +2,15 @@ export const defaultTerminalSettings = {
   shortcuts: {
     openCommandBar: "Ctrl+K",
     newTab: "Ctrl+T",
+    copySelection: "Ctrl+Shift+C",
+    pasteClipboard: "Ctrl+Shift+V",
     splitVertical: "Alt+Shift+V",
     splitHorizontal: "Alt+Shift+H",
     closePane: "Ctrl+Shift+W",
+    focusPaneLeft: "Alt+Left",
+    focusPaneRight: "Alt+Right",
+    focusPaneUp: "Alt+Up",
+    focusPaneDown: "Alt+Down",
     closeTab: "Ctrl+W",
     nextTab: "Ctrl+Tab",
     previousTab: "Ctrl+Shift+Tab",
@@ -18,11 +24,20 @@ export const defaultTerminalSettings = {
     focusTab8: "Alt+8",
     focusTab9: "Alt+9",
   },
+  leader: {
+    enabled: false,
+    trigger: "",
+    timeoutMs: 1200,
+    shortcuts: {},
+  },
   terminal: {
     cursorBlink: true,
     fontFamily: "Cascadia Code, Consolas, monospace",
     fontSize: 14,
     lineHeight: 1.35,
+    scrollback: 5000,
+    rightClickBehavior: "paste",
+    copyOnSelect: false,
     theme: {
       background: "#0d1218",
       foreground: "#e8edf5",
@@ -44,6 +59,11 @@ export const defaultTerminalSettings = {
       white: "#d8dee9",
       brightWhite: "#f8fbff",
     },
+  },
+  commandBar: {
+    nextItem: "Tab",
+    previousItem: "Shift+Tab",
+    runSelected: "Enter",
   },
 };
 

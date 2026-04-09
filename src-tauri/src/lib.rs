@@ -298,11 +298,14 @@ fn resolve_session_cwd(cwd: Option<String>) -> Result<PathBuf, String> {
 }
 
 fn terminal_settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let config_dir = app
+    let home_dir = app
         .path()
-        .app_config_dir()
+        .home_dir()
         .map_err(|error| error.to_string())?;
-    Ok(config_dir.join("settings.json"))
+    Ok(home_dir
+        .join(".config")
+        .join("tauri-termin")
+        .join("settings.json"))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

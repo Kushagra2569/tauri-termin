@@ -6,8 +6,10 @@
   import TerminalSplitTree from "$lib/components/TerminalSplitTree.svelte";
   import {
     actionDefinitions,
+    findActionByLeader,
     findActionByShortcut,
-    getShortcutLabel,
+    getActionBindingLabel,
+    matchesShortcut,
   } from "$lib/terminal-actions";
   import {
     createTerminalSettings,
@@ -19,12 +21,12 @@
    * @typedef {{ sessionId: string, cwd: string }} TerminalSessionResult
    * @typedef {{ output: string, cwd: string, exited: boolean }} TerminalOutputResult
    * @typedef {{ id: string, label: string, shortcut: string, description: string, run: () => void }} PaletteAction
-   * @typedef {{ terminal: import("xterm").Terminal, fitAddon: FitAddon }} TerminalRuntime
+   * @typedef {{ terminal: import("xterm").Terminal, fitAddon: FitAddon, removeSelectionHandler: (() => void) | null, removeContextMenuHandler: (() => void) | null }} TerminalRuntime
    * @typedef {{ id: string, title: string, sessionId: string | null, cwd: string | null, busy: boolean, host: HTMLDivElement | null, runtime: TerminalRuntime | null, transcript: string }} TerminalPane
    * @typedef {{ id: string, paneId: string, type: "pane" }} PaneNode
-   * @typedef {{ id: string, direction: "row" | "column", type: "split", children: Array<PaneNode | SplitNode> }} SplitNode
+   * @typedef {{ id: string, direction: "row" | "column", type: "split", sizes: number[], children: Array<PaneNode | SplitNode> }} SplitNode
    * @typedef {PaneNode | SplitNode} LayoutNode
-   * @typedef {{ id: string, title: string, panes: TerminalPane[], rootNode: LayoutNode, activePaneId: string | null }} TerminalTab
+   * @typedef {{ id: string, title: string, panes: TerminalPane[], rootNode: LayoutNode, activePaneId: string | null, paneNavigationHints: Record<string, Partial<Record<"left" | "right" | "up" | "down", string>>> }} TerminalTab
    */
 
   /** @type {TerminalTab[]} */
@@ -32,6 +34,7 @@
   let activeTabId = $state("tab-1");
   let paletteOpen = $state(false);
   let paletteQuery = $state("");
+  let selectedPaletteIndex = $state(0);
   /** @type {HTMLInputElement | null} */
   let paletteInput = $state(null);
   /** @type {number | null} */
@@ -42,6 +45,9 @@
   let terminalViewport = $state(null);
   let removeShortcutListener = $state(() => {});
   let settings = $state(createTerminalSettings());
+  let leaderActive = $state(false);
+  /** @type {number | null} */
+  let leaderTimer = null;
 
   const sshProfiles = [
     "deploy@prod-east.example.com",
@@ -67,7 +73,7 @@
         id: action.id,
         label: action.label,
         description: action.description,
-        shortcut: getShortcutLabel(settings, action.id) || "Command bar",
+        shortcut: getActionBindingLabel(settings, action.id) || "Command bar",
         run: () => performAction(action.id),
       }))
       .filter((action) => !action.id.startsWith("focusTab") || canFocusTab(action.id)),
@@ -87,6 +93,21 @@
     );
   });
 
+  $effect(() => {
+    if (!paletteOpen) {
+      return;
+    }
+
+    if (filteredPaletteActions.length === 0) {
+      selectedPaletteIndex = 0;
+      return;
+    }
+
+    if (selectedPaletteIndex >= filteredPaletteActions.length) {
+      selectedPaletteIndex = 0;
+    }
+  });
+
   /**
    * @param {string} id
    * @param {string} title
@@ -104,6 +125,7 @@
         paneId,
       },
       activePaneId: paneId,
+      paneNavigationHints: {},
     };
   }
 
@@ -196,13 +218,37 @@
   function openPalette() {
     paletteOpen = true;
     paletteQuery = "";
+    selectedPaletteIndex = 0;
     queueMicrotask(() => paletteInput?.focus());
   }
 
   function closePalette() {
     paletteOpen = false;
     paletteQuery = "";
+    selectedPaletteIndex = 0;
     focusActiveTerminal();
+  }
+
+  function clearLeaderMode() {
+    leaderActive = false;
+
+    if (leaderTimer) {
+      window.clearTimeout(leaderTimer);
+      leaderTimer = null;
+    }
+  }
+
+  function activateLeaderMode() {
+    clearLeaderMode();
+    leaderActive = true;
+    leaderTimer = window.setTimeout(() => {
+      leaderActive = false;
+      leaderTimer = null;
+    }, settings.leader.timeoutMs);
+  }
+
+  function isLeaderEnabled() {
+    return !!settings.leader?.enabled && !!settings.leader?.trigger;
   }
 
   /**
@@ -213,9 +259,30 @@
       return;
     }
 
+    if (paletteOpen && handleCommandBarNavigation(event)) {
+      return;
+    }
+
     if (event.key === "Escape" && paletteOpen) {
       event.preventDefault();
       closePalette();
+      return;
+    }
+
+    if (leaderActive && isLeaderEnabled()) {
+      const leaderAction = findActionByLeader(settings, event);
+      clearLeaderMode();
+
+      if (leaderAction) {
+        event.preventDefault();
+        performAction(leaderAction.id);
+        return;
+      }
+    }
+
+    if (isLeaderEnabled() && matchesShortcut(settings.leader.trigger, event)) {
+      event.preventDefault();
+      activateLeaderMode();
       return;
     }
 
@@ -227,6 +294,53 @@
   }
 
   /**
+   * @param {KeyboardEvent} event
+   */
+  function handleCommandBarNavigation(event) {
+    if (!paletteOpen) {
+      return false;
+    }
+
+    if (matchesShortcut(settings.commandBar.nextItem, event)) {
+      event.preventDefault();
+      movePaletteSelection(1);
+      return true;
+    }
+
+    if (matchesShortcut(settings.commandBar.previousItem, event)) {
+      event.preventDefault();
+      movePaletteSelection(-1);
+      return true;
+    }
+
+    if (matchesShortcut(settings.commandBar.runSelected, event)) {
+      if (filteredPaletteActions.length === 0) {
+        return true;
+      }
+
+      event.preventDefault();
+      runPaletteAction(filteredPaletteActions[selectedPaletteIndex] ?? filteredPaletteActions[0]);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * @param {number} offset
+   */
+  function movePaletteSelection(offset) {
+    if (filteredPaletteActions.length === 0) {
+      selectedPaletteIndex = 0;
+      return;
+    }
+
+    selectedPaletteIndex =
+      (selectedPaletteIndex + offset + filteredPaletteActions.length) %
+      filteredPaletteActions.length;
+  }
+
+  /**
    * @param {string} text
    */
   function writeSystemMessage(text) {
@@ -235,6 +349,89 @@
     }
 
     appendPaneOutput(activeTab.id, activePane.id, `\r\n${text}\r\n`);
+  }
+
+  async function copyActiveSelection() {
+    const selection = activePane?.runtime?.terminal.getSelection() ?? "";
+    if (!selection) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(selection);
+    } catch (error) {
+      writeSystemMessage(`Clipboard copy failed: ${String(error)}`);
+    }
+  }
+
+  /**
+   * @param {TerminalPane | null} pane
+   */
+  async function pasteClipboardIntoPane(pane) {
+    if (!pane?.sessionId) {
+      return;
+    }
+
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        return;
+      }
+
+      await invoke("write_terminal_input", {
+        sessionId: pane.sessionId,
+        input: text,
+      });
+    } catch (error) {
+      writeSystemMessage(`Clipboard paste failed: ${String(error)}`);
+    }
+  }
+
+  /**
+   * @param {string} tabId
+   * @param {string} paneId
+   */
+  function handlePaneSelectionChange(tabId, paneId) {
+    const pane = getPane(tabId, paneId);
+    if (!pane?.runtime || !settings.terminal.copyOnSelect) {
+      return;
+    }
+
+    const selection = pane.runtime.terminal.getSelection();
+    if (!selection) {
+      return;
+    }
+
+    navigator.clipboard.writeText(selection).catch(() => {});
+  }
+
+  /**
+   * @param {MouseEvent} event
+   * @param {string} tabId
+   * @param {string} paneId
+   */
+  function handlePaneContextMenu(event, tabId, paneId) {
+    const pane = getPane(tabId, paneId);
+    if (!pane?.runtime) {
+      return;
+    }
+
+    const behavior = settings.terminal.rightClickBehavior;
+    if (behavior === "native") {
+      return;
+    }
+
+    event.preventDefault();
+    activatePane(tabId, paneId);
+
+    if (behavior === "copy-paste" && pane.runtime.terminal.hasSelection()) {
+      navigator.clipboard.writeText(pane.runtime.terminal.getSelection()).catch(() => {});
+      return;
+    }
+
+    if (behavior === "paste" || behavior === "copy-paste") {
+      pasteClipboardIntoPane(pane);
+    }
   }
 
   /**
@@ -252,6 +449,7 @@
       fontFamily: settings.terminal.fontFamily,
       fontSize: settings.terminal.fontSize,
       lineHeight: settings.terminal.lineHeight,
+      scrollback: settings.terminal.scrollback,
       theme: settings.terminal.theme,
       allowProposedApi: false,
       convertEol: false,
@@ -274,7 +472,19 @@
       });
     });
 
-    pane.runtime = { terminal, fitAddon };
+    const selectionHandler = () => handlePaneSelectionChange(tabId, paneId);
+    const selectionDisposable = terminal.onSelectionChange(selectionHandler);
+
+    const contextMenuHandler = /** @param {MouseEvent} event */ (event) =>
+      handlePaneContextMenu(event, tabId, paneId);
+    pane.host.addEventListener("contextmenu", contextMenuHandler);
+
+    pane.runtime = {
+      terminal,
+      fitAddon,
+      removeSelectionHandler: () => selectionDisposable.dispose(),
+      removeContextMenuHandler: () => pane.host?.removeEventListener("contextmenu", contextMenuHandler),
+    };
     if (pane.transcript) {
       terminal.write(pane.transcript);
     } else {
@@ -284,6 +494,40 @@
 
   function focusActiveTerminal() {
     activePane?.runtime?.terminal.focus();
+  }
+
+  /**
+   * @param {"left" | "right" | "up" | "down"} direction
+   */
+  function focusAdjacentPane(direction) {
+    if (!activeTab || !activePane?.host) {
+      return;
+    }
+
+    const hintedPaneId = activeTab.paneNavigationHints[activePane.id]?.[direction];
+    if (hintedPaneId && activeTab.panes.some((pane) => pane.id === hintedPaneId)) {
+      activatePane(activeTab.id, hintedPaneId);
+      return;
+    }
+
+    const sourceRect = activePane.host.getBoundingClientRect();
+    const candidates = activeTab.panes
+      .filter((pane) => pane.id !== activePane.id && pane.host)
+      .map((pane) => ({
+        pane,
+        rect: /** @type {HTMLDivElement} */ (pane.host).getBoundingClientRect(),
+      }))
+      .filter(({ rect }) => isCandidateInDirection(sourceRect, rect, direction))
+      .map(({ pane, rect }) => ({
+        pane,
+        score: paneDirectionScore(sourceRect, rect, direction),
+      }))
+      .sort((left, right) => left.score - right.score);
+
+    if (candidates.length > 0) {
+      rememberPaneNavigation(activeTab, activePane.id, candidates[0].pane.id, direction);
+      activatePane(activeTab.id, candidates[0].pane.id);
+    }
   }
 
   /**
@@ -453,6 +697,16 @@
       return;
     }
 
+    if (actionId === "copySelection") {
+      await copyActiveSelection();
+      return;
+    }
+
+    if (actionId === "pasteClipboard") {
+      await pasteClipboardIntoPane(activePane);
+      return;
+    }
+
     if (actionId === "splitVertical" && activeTab) {
       await splitActivePane(activeTab.id, "row");
       closePalette();
@@ -467,6 +721,26 @@
 
     if (actionId === "closePane" && activeTab?.activePaneId) {
       await closePane(activeTab.id, activeTab.activePaneId);
+      return;
+    }
+
+    if (actionId === "focusPaneLeft") {
+      focusAdjacentPane("left");
+      return;
+    }
+
+    if (actionId === "focusPaneRight") {
+      focusAdjacentPane("right");
+      return;
+    }
+
+    if (actionId === "focusPaneUp") {
+      focusAdjacentPane("up");
+      return;
+    }
+
+    if (actionId === "focusPaneDown") {
+      focusAdjacentPane("down");
       return;
     }
 
@@ -607,9 +881,25 @@
 
     const captureShortcutListener = /** @param {KeyboardEvent} event */ (event) => {
       const isEscape = event.key === "Escape" && paletteOpen;
+      const isLeaderTrigger =
+        isLeaderEnabled() && matchesShortcut(settings.leader.trigger, event);
+      const leaderAction =
+        leaderActive && isLeaderEnabled() ? findActionByLeader(settings, event) : null;
       const shortcutAction = findActionByShortcut(settings, event);
+      const isCommandBarNavigation =
+        paletteOpen &&
+        (matchesShortcut(settings.commandBar.nextItem, event) ||
+          matchesShortcut(settings.commandBar.previousItem, event) ||
+          matchesShortcut(settings.commandBar.runSelected, event));
 
-      if (!shortcutAction && !isEscape) {
+      if (
+        !shortcutAction &&
+        !isEscape &&
+        !isCommandBarNavigation &&
+        !isLeaderTrigger &&
+        !leaderAction &&
+        !leaderActive
+      ) {
         return;
       }
 
@@ -634,11 +924,14 @@
       window.clearInterval(pollTimer);
     }
 
+    clearLeaderMode();
     resizeObserver?.disconnect();
     removeShortcutListener();
 
     for (const tab of tabs) {
       for (const pane of tab.panes) {
+        pane.runtime?.removeSelectionHandler?.();
+        pane.runtime?.removeContextMenuHandler?.();
         pane.runtime?.terminal.dispose();
         if (pane.sessionId) {
           invoke("close_terminal_session", { sessionId: pane.sessionId }).catch(() => {});
@@ -675,6 +968,8 @@
 
     pane.host = element;
     if (pane.runtime) {
+      pane.runtime.removeSelectionHandler?.();
+      pane.runtime.removeContextMenuHandler?.();
       pane.runtime.terminal.dispose();
       pane.runtime = null;
     }
@@ -716,6 +1011,7 @@
         id: `split-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         type: "split",
         direction,
+        sizes: [1, 1],
         children: [
           node,
           {
@@ -749,14 +1045,80 @@
       .map((child) => (containsPane(child, paneId) ? removePaneNode(child, paneId) : child))
       .filter((child) => !(child.type === "pane" && child.paneId === paneId));
 
+    const keptSizes = node.sizes.filter((_, index) => {
+      const child = node.children[index];
+      return !(child.type === "pane" && child.paneId === paneId);
+    });
+
     if (keptChildren.length === 1) {
       return keptChildren[0];
     }
 
     return {
       ...node,
+      sizes: normalizeSizes(keptSizes),
       children: keptChildren,
     };
+  }
+
+  /**
+   * @param {string} splitId
+   * @param {number} index
+   * @param {number} leftSize
+   * @param {number} rightSize
+   */
+  function resizeSplit(splitId, index, leftSize, rightSize) {
+    if (!activeTab) {
+      return;
+    }
+
+    activeTab.rootNode = resizeSplitNode(activeTab.rootNode, splitId, index, leftSize, rightSize);
+    queueMicrotask(() => resizeActiveTerminals());
+  }
+
+  /**
+   * @param {LayoutNode} node
+   * @param {string} splitId
+   * @param {number} index
+   * @param {number} leftSize
+   * @param {number} rightSize
+   * @returns {LayoutNode}
+   */
+  function resizeSplitNode(node, splitId, index, leftSize, rightSize) {
+    if (node.type === "pane") {
+      return node;
+    }
+
+    if (node.id === splitId) {
+      const sizes = [...node.sizes];
+      sizes[index] = leftSize;
+      sizes[index + 1] = rightSize;
+
+      return {
+        ...node,
+        sizes,
+      };
+    }
+
+    return {
+      ...node,
+      children: node.children.map((child) =>
+        resizeSplitNode(child, splitId, index, leftSize, rightSize),
+      ),
+    };
+  }
+
+  /**
+   * @param {number[]} sizes
+   * @returns {number[]}
+   */
+  function normalizeSizes(sizes) {
+    if (sizes.length === 0) {
+      return sizes;
+    }
+
+    const total = sizes.reduce((sum, value) => sum + value, 0);
+    return total > 0 ? sizes.map((value) => value / total) : sizes.map(() => 1 / sizes.length);
   }
 
   /**
@@ -783,6 +1145,86 @@
 
     return node.children.length > 0 ? firstPaneIdFromNode(node.children[0]) : null;
   }
+
+  /**
+   * @param {TerminalTab} tab
+   * @param {string} fromPaneId
+   * @param {string} toPaneId
+   * @param {"left" | "right" | "up" | "down"} direction
+   */
+  function rememberPaneNavigation(tab, fromPaneId, toPaneId, direction) {
+    const oppositeDirection = oppositePaneDirection(direction);
+
+    tab.paneNavigationHints = {
+      ...tab.paneNavigationHints,
+      [fromPaneId]: {
+        ...tab.paneNavigationHints[fromPaneId],
+        [direction]: toPaneId,
+      },
+      [toPaneId]: {
+        ...tab.paneNavigationHints[toPaneId],
+        [oppositeDirection]: fromPaneId,
+      },
+    };
+  }
+
+  /**
+   * @param {"left" | "right" | "up" | "down"} direction
+   * @returns {"left" | "right" | "up" | "down"}
+   */
+  function oppositePaneDirection(direction) {
+    if (direction === "left") {
+      return "right";
+    }
+
+    if (direction === "right") {
+      return "left";
+    }
+
+    if (direction === "up") {
+      return "down";
+    }
+
+    return "up";
+  }
+
+  /**
+   * @param {DOMRect} source
+   * @param {DOMRect} target
+   * @param {"left" | "right" | "up" | "down"} direction
+   */
+  function isCandidateInDirection(source, target, direction) {
+    if (direction === "left") {
+      return target.right <= source.left;
+    }
+
+    if (direction === "right") {
+      return target.left >= source.right;
+    }
+
+    if (direction === "up") {
+      return target.bottom <= source.top;
+    }
+
+    return target.top >= source.bottom;
+  }
+
+  /**
+   * @param {DOMRect} source
+   * @param {DOMRect} target
+   * @param {"left" | "right" | "up" | "down"} direction
+   */
+  function paneDirectionScore(source, target, direction) {
+    if (direction === "left" || direction === "right") {
+      const primary = Math.abs((direction === "left" ? source.left : source.right) - (direction === "left" ? target.right : target.left));
+      const secondary = Math.abs(source.top + source.height / 2 - (target.top + target.height / 2));
+      return primary * 10 + secondary;
+    }
+
+    const primary = Math.abs((direction === "up" ? source.top : source.bottom) - (direction === "up" ? target.bottom : target.top));
+    const secondary = Math.abs(source.left + source.width / 2 - (target.left + target.width / 2));
+    return primary * 10 + secondary;
+  }
 </script>
 
 <main class="app-shell">
@@ -801,10 +1243,11 @@
     </div>
 
     <div class="tab-actions">
+      <button class="action-button" title="Close pane" type="button" onclick={() => performAction("closePane")}>x</button>
       <button class="action-button" type="button" onclick={() => performAction("splitVertical")}>|</button>
       <button class="action-button" type="button" onclick={() => performAction("splitHorizontal")}>-</button>
       <button class="action-button" type="button" onclick={() => performAction("newTab")}>+</button>
-      <button class="action-button" type="button" onclick={() => performAction("openCommandBar")}>⌘</button>
+      <button class="action-button" title="Open command bar" type="button" onclick={() => performAction("openCommandBar")}>/</button>
     </div>
   </section>
 
@@ -814,6 +1257,7 @@
         <TerminalSplitTree
           activePaneId={activeTab.activePaneId}
           node={activeTab.rootNode}
+          onResizeSplit={resizeSplit}
           panes={activeTab.panes}
           onMountHost={(paneId, element) => setPaneHost(activeTab.id, paneId, element)}
           onSelectPane={(paneId) => activatePane(activeTab.id, paneId)}
@@ -833,7 +1277,15 @@
 
       <div class="palette-results">
         {#each filteredPaletteActions as action (action.id)}
-          <button class="palette-item" type="button" onclick={() => runPaletteAction(action)}>
+          <button
+            class:selected={filteredPaletteActions[selectedPaletteIndex]?.id === action.id}
+            class="palette-item"
+            type="button"
+            onmousemove={() => {
+              selectedPaletteIndex = filteredPaletteActions.findIndex((entry) => entry.id === action.id);
+            }}
+            onclick={() => runPaletteAction(action)}
+          >
             <div>
               <strong>{action.label}</strong>
               <p>{action.description}</p>
@@ -897,22 +1349,24 @@
   .tabbar {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: 10px;
-    padding: 6px 10px;
+    padding: 8px 10px 7px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    background:
+      linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.01));
   }
 
   .tabs {
     display: flex;
     gap: 4px;
     min-width: 0;
+    flex: 1;
     overflow: auto;
   }
 
   .tab {
-    min-width: 88px;
-    max-width: 180px;
+    min-width: 72px;
+    max-width: 170px;
     padding: 5px 9px;
     border: 1px solid transparent;
     border-radius: 8px;
@@ -928,8 +1382,12 @@
 
   .tab.active {
     color: #eef3fb;
-    background: rgba(255, 255, 255, 0.04);
-    border-color: rgba(255, 255, 255, 0.06);
+    background: rgba(255, 255, 255, 0.045);
+    border-color: rgba(255, 255, 255, 0.07);
+  }
+
+  .tab:hover {
+    background: rgba(255, 255, 255, 0.025);
   }
 
   .tab-actions {
@@ -946,6 +1404,16 @@
     color: #9dabc0;
     cursor: pointer;
     font-size: 0.82rem;
+    transition:
+      background 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .action-button:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.14);
+    color: #eef3fb;
   }
 
   .terminal-panel {
@@ -960,6 +1428,7 @@
     position: fixed;
     inset: 0;
     background: rgba(0, 0, 0, 0.5);
+    z-index: 40;
   }
 
   .palette {
@@ -973,6 +1442,7 @@
     background: #111720;
     overflow: hidden;
     box-shadow: 0 24px 60px rgba(0, 0, 0, 0.4);
+    z-index: 50;
   }
 
   .palette input {
@@ -990,6 +1460,12 @@
     max-height: 280px;
     overflow: auto;
     padding: 8px;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  .palette-results::-webkit-scrollbar {
+    display: none;
   }
 
   .palette-item {
@@ -1007,7 +1483,8 @@
     cursor: pointer;
   }
 
-  .palette-item:hover {
+  .palette-item:hover,
+  .palette-item.selected {
     background: rgba(255, 255, 255, 0.05);
   }
 
