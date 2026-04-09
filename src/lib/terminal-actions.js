@@ -15,6 +15,11 @@ export const actionDefinitions = [
     description: "Reload settings.json and apply the latest configuration.",
   },
   {
+    id: "quitApplication",
+    label: "Quit application",
+    description: "Close the terminal window and exit the app.",
+  },
+  {
     id: "copySelection",
     label: "Copy selection",
     description: "Copy the current terminal selection to the clipboard.",

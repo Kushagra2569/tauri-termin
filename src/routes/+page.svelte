@@ -496,6 +496,11 @@
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(pane.host);
+    if (terminal.element) {
+      terminal.element.style.fontFeatureSettings = settings.terminal.enableLigatures
+        ? settings.terminal.fontFeatureSettings
+        : "";
+    }
     fitAddon.fit();
 
     terminal.onData((data) => {
@@ -547,6 +552,11 @@
         runtime.terminal.options.lineHeight = settings.terminal.lineHeight;
         runtime.terminal.options.scrollback = settings.terminal.scrollback;
         runtime.terminal.options.theme = settings.terminal.theme;
+        if (runtime.terminal.element) {
+          runtime.terminal.element.style.fontFeatureSettings = settings.terminal.enableLigatures
+            ? settings.terminal.fontFeatureSettings
+            : "";
+        }
       }
     }
 
@@ -802,6 +812,12 @@
           : "Configuration reloaded from settings.json.",
       );
       closePalette();
+      return;
+    }
+
+    if (actionId === "quitApplication") {
+      closePalette();
+      await closeWindow();
       return;
     }
 

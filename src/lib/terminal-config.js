@@ -37,6 +37,8 @@ export const defaultTerminalSettings = {
   terminal: {
     cursorBlink: true,
     fontFamily: "Cascadia Code, Consolas, monospace",
+    enableLigatures: false,
+    fontFeatureSettings: "\"calt\" on",
     fontSize: 14,
     lineHeight: 1.35,
     scrollback: 5000,

@@ -50,6 +50,8 @@ Only keys defined in the frontend settings schema are applied. Unknown keys are 
   "terminal": {
     "cursorBlink": true,
     "fontFamily": "Cascadia Code, Consolas, monospace",
+    "enableLigatures": false,
+    "fontFeatureSettings": "\"calt\" on",
     "fontSize": 14,
     "lineHeight": 1.35,
     "scrollback": 5000,
@@ -190,7 +192,25 @@ Leader shortcut action ids can use the same action names listed in the `shortcut
 
 - Type: string
 - Default: `"Cascadia Code, Consolas, monospace"`
-- Example: `"JetBrains Mono, Consolas, monospace"`
+- Example: `"JetBrainsMono Nerd Font, Cascadia Code, Consolas, monospace"`
+- Meaning: any installed monospaced font family can be used here, including Nerd Fonts
+
+### `enableLigatures`
+
+- Type: boolean
+- Default: `false`
+- Values: `true`, `false`
+- Meaning: enables programming ligatures in the terminal when the chosen font supports them
+
+### `fontFeatureSettings`
+
+- Type: string
+- Default: `"\"calt\" on"`
+- Example values:
+  - `"\"calt\" on"`
+  - `"\"calt\" on, \"ss01\" on"`
+  - `"normal"`
+- Meaning: CSS `font-feature-settings` value passed to the ligatures addon when ligatures are enabled
 
 ### `fontSize`
 
