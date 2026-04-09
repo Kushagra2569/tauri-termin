@@ -1473,7 +1473,7 @@
     min-height: 100vh;
     height: 100vh;
     overflow: hidden;
-    background: #0b0f14;
+    background: #0d1218;
     color: #e8edf5;
     font-family: "Segoe UI", "IBM Plex Sans", sans-serif;
   }
@@ -1508,10 +1508,7 @@
     min-height: 100vh;
     height: 100vh;
     overflow: hidden;
-    background:
-      radial-gradient(circle at top, rgba(255, 255, 255, 0.045), transparent 22%),
-      linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 12%),
-      #0b0f14;
+    background: #0d1218;
   }
 
   .titlebar {
@@ -1541,7 +1538,7 @@
     align-items: stretch;
     gap: 2px;
     min-width: 0;
-    flex: 1 1 auto;
+    flex: 0 1 auto;
     overflow: auto;
   }
 
@@ -1566,6 +1563,7 @@
   }
 
   .titlebar-native .tabs {
+    flex: 1 1 auto;
     padding-top: 2px;
   }
 
@@ -1605,7 +1603,7 @@
   }
 
   .titlebar-drag-space-controls {
-    flex: 0 1 96px;
+    flex: 1 1 auto;
   }
 
   .window-button {
@@ -1691,6 +1689,7 @@
     padding: 0 0 6px;
     box-sizing: border-box;
     overflow: hidden;
+    background: #0d1218;
   }
 
   .palette-backdrop {

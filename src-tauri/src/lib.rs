@@ -334,6 +334,9 @@ pub fn run() {
                 window
                     .set_decorations(!use_custom_titlebar)
                     .map_err(|error| error.to_string())?;
+                window
+                    .set_shadow(!use_custom_titlebar)
+                    .map_err(|error| error.to_string())?;
                 window.show().map_err(|error| error.to_string())?;
             }
 
