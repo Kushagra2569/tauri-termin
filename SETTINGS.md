@@ -45,7 +45,8 @@ Only keys defined in the frontend settings schema are applied. Unknown keys are 
   },
   "window": {
     "titleBar": "native",
-    "showControlsInMinimalTitleBar": true
+    "showControlsInMinimalTitleBar": true,
+    "backgroundOpacity": 1
   },
   "terminal": {
     "cursorBlink": true,
@@ -337,6 +338,23 @@ Behavior details:
 - `false`: hides those custom buttons for a cleaner look
 
 This does not affect the native Windows title bar.
+
+### `backgroundOpacity`
+
+- Type: number
+- Default: `1`
+- Example values:
+  - `1`
+  - `0.92`
+  - `0.8`
+  - `0.65`
+
+Behavior details:
+
+- controls the transparency of the terminal surface and app chrome
+- `1` is fully opaque
+- lower values make the minimal window show more of the desktop behind it
+- values are clamped between `0.15` and `1`
 
 ## `commandBar`
 

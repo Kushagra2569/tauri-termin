@@ -33,6 +33,9 @@ export const defaultTerminalSettings = {
   window: {
     titleBar: "native",
     showControlsInMinimalTitleBar: true,
+    backgroundOpacity: 1,
+    blurBackground: false,
+    blurIntensity: 0.35,
   },
   terminal: {
     cursorBlink: true,

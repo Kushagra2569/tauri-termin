@@ -58,6 +58,17 @@
   const showsMinimalWindowControls = $derived(
     usesMinimalTitleBar && settings.window?.showControlsInMinimalTitleBar !== false,
   );
+  const appChromeStyle = $derived.by(() => {
+    const opacity = clampWindowOpacity(settings.window?.backgroundOpacity ?? 1);
+    return [
+      `--window-surface:${applyOpacityToColor(settings.terminal.theme.background, opacity)}`,
+      `--window-titlebar:${applyOpacityToColor("#080b10", Math.min(opacity + 0.08, 0.96))}`,
+      `--window-divider:${applyOpacityToColor("#ffffff", Math.max(opacity * 0.08, 0.04))}`,
+      `--window-commandbar:${applyOpacityToColor("#0c1018", Math.min(opacity + 0.1, 0.98))}`,
+      `--window-backdrop:${applyOpacityToColor("#000000", Math.min(opacity * 0.6, 0.5))}`,
+      `--window-button-restore:${applyOpacityToColor("#080b10", Math.min(opacity + 0.08, 0.92))}`,
+    ].join(";");
+  });
 
   const sshProfiles = [
     "deploy@prod-east.example.com",
@@ -489,7 +500,7 @@
       fontSize: settings.terminal.fontSize,
       lineHeight: settings.terminal.lineHeight,
       scrollback: settings.terminal.scrollback,
-      theme: settings.terminal.theme,
+      theme: buildTerminalTheme(),
       allowProposedApi: false,
       convertEol: false,
     });
@@ -551,7 +562,7 @@
         runtime.terminal.options.fontSize = settings.terminal.fontSize;
         runtime.terminal.options.lineHeight = settings.terminal.lineHeight;
         runtime.terminal.options.scrollback = settings.terminal.scrollback;
-        runtime.terminal.options.theme = settings.terminal.theme;
+        runtime.terminal.options.theme = buildTerminalTheme();
         if (runtime.terminal.element) {
           runtime.terminal.element.style.fontFeatureSettings = settings.terminal.enableLigatures
             ? settings.terminal.fontFeatureSettings
@@ -1361,9 +1372,63 @@
     const secondary = Math.abs(source.left + source.width / 2 - (target.left + target.width / 2));
     return primary * 10 + secondary;
   }
+
+  function buildTerminalTheme() {
+    return {
+      ...settings.terminal.theme,
+      background: applyOpacityToColor(
+        settings.terminal.theme.background,
+        settings.window?.backgroundOpacity ?? 1,
+      ),
+    };
+  }
+
+  /**
+   * @param {number} value
+   */
+  function clampWindowOpacity(value) {
+    if (typeof value !== "number" || Number.isNaN(value)) {
+      return 1;
+    }
+
+    return Math.min(1, Math.max(0.15, value));
+  }
+
+  /**
+   * @param {string} color
+   * @param {number} opacity
+   */
+  function applyOpacityToColor(color, opacity) {
+    const alpha = clampWindowOpacity(opacity);
+    const value = color.trim();
+
+    if (value.startsWith("#")) {
+      const hex = value.slice(1);
+      if (hex.length === 3) {
+        const [r, g, b] = hex.split("").map((part) => parseInt(part + part, 16));
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+
+      if (hex.length === 6 || hex.length === 8) {
+        const normalized = hex.slice(0, 6);
+        const r = parseInt(normalized.slice(0, 2), 16);
+        const g = parseInt(normalized.slice(2, 4), 16);
+        const b = parseInt(normalized.slice(4, 6), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+      }
+    }
+
+    const rgbMatch = value.match(/^rgba?\(([^)]+)\)$/i);
+    if (rgbMatch) {
+      const [r = "0", g = "0", b = "0"] = rgbMatch[1].split(",").map((part) => part.trim());
+      return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    }
+
+    return value;
+  }
 </script>
 
-<main class="app-shell">
+<main class:app-shell-minimal={usesMinimalTitleBar} class="app-shell" style={appChromeStyle}>
   {#if usesMinimalTitleBar}
     <section class="titlebar titlebar-minimal">
       <div class="tabs">
@@ -1473,7 +1538,7 @@
     min-height: 100vh;
     height: 100vh;
     overflow: hidden;
-    background: #0d1218;
+    background: transparent;
     color: #e8edf5;
     font-family: "Segoe UI", "IBM Plex Sans", sans-serif;
   }
@@ -1481,6 +1546,7 @@
   :global(html) {
     height: 100%;
     overflow: hidden;
+    background: transparent;
   }
 
   :global(button),
@@ -1508,14 +1574,18 @@
     min-height: 100vh;
     height: 100vh;
     overflow: hidden;
-    background: #0d1218;
+    background: var(--window-surface);
+  }
+
+  .app-shell-minimal {
+    border-radius: 10px;
   }
 
   .titlebar {
     display: flex;
     align-items: stretch;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
-    background: rgba(8, 11, 16, 0.92);
+    border-bottom: 1px solid var(--window-divider);
+    background: var(--window-titlebar);
     backdrop-filter: blur(14px);
     user-select: none;
   }
@@ -1661,7 +1731,7 @@
     position: absolute;
     inset: 0 2px 2px 0;
     border: 1px solid currentColor;
-    background: rgba(8, 11, 16, 0.92);
+    background: var(--window-button-restore);
   }
 
   .window-icon.close::before,
@@ -1689,13 +1759,13 @@
     padding: 0 0 6px;
     box-sizing: border-box;
     overflow: hidden;
-    background: #0d1218;
+    background: var(--window-surface);
   }
 
   .palette-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.5);
+    background: var(--window-backdrop);
     z-index: 40;
   }
 
@@ -1705,9 +1775,9 @@
     left: 50%;
     width: min(720px, calc(100vw - 32px));
     transform: translateX(-50%);
-    border: 1px solid rgba(255, 255, 255, 0.05);
+    border: 1px solid var(--window-divider);
     border-radius: 14px;
-    background: rgba(12, 16, 24, 0.96);
+    background: var(--window-commandbar);
     overflow: hidden;
     box-shadow: 0 28px 80px rgba(0, 0, 0, 0.52);
     z-index: 50;
