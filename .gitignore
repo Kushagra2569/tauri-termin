@@ -8,3 +8,5 @@ node_modules
 !.env.example
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+.vscode/extensions.json
+.vscode/settings.json
